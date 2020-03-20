@@ -42,6 +42,8 @@ from jax import random
 
 import jax.nn
 import jax.numpy as jnp
+import jax.profiler
+from jax.lib import xla_client
 
 import tensorflow.compat.v2 as tf
 
@@ -76,6 +78,11 @@ flags.DEFINE_float(
     'loss_scaling', default=1.,
     help=('Rescale the loss to avoid underflow when training with'
           ' reduced precision'))
+
+flags.DEFINE_integer('jax_gpu_server_port', 0, 'Address of JAX GPU master')
+flags.DEFINE_string('jax_gpu_server_address', '', 'Address of JAX GPU master')
+flags.DEFINE_integer('jax_gpu_num_nodes', 1, 'Num GPU nodes.')
+flags.DEFINE_integer('jax_gpu_node_id', 0, 'Num GPU nodes.')
 
 
 def create_model(key, batch_size, image_size, model_dtype):
@@ -214,10 +221,27 @@ def main(argv):
   if len(argv) > 1:
     raise app.UsageError('Too many command-line arguments.')
 
+  # Monkey-patch in the distributed system support.
+  if FLAGS.jax_gpu_server_address:
+    if FLAGS.jax_gpu_node_id == 0:
+      jax_gpu_server = xla_client._xla.get_distributed_runtime_service(
+          '[::]:{}'.format(FLAGS.jax_gpu_server_port), FLAGS.jax_gpu_num_nodes)
+    client = xla_client._xla.get_distributed_runtime_client(
+          "dns:///{}}:{}".format(FLAGS.jax_gpu_server_address,
+                                 FLAGS.jax_gpu_server_port))
+    factory = functools.partial(
+          xla_client._gpu_backend_factory,
+          distributed_client=client,
+          node_id=FLAGS.jax_gpu_node_id)
+    xla_client.register_local_backend_factory("gpu", factory)
+
   tf.enable_v2_behavior()
   # make sure tf does not allocate gpu memory
   tf.config.experimental.set_visible_devices([], 'GPU')
 
+  profiler = jax.profiler.start_server(port=1234)
+
+  print("JAX devices: ", jax.devices())
   if jax.host_id() == 0:
     summary_writer = tensorboard.SummaryWriter(FLAGS.model_dir)
 
