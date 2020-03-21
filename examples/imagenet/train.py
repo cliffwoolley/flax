@@ -313,46 +313,46 @@ def main(argv):
     epoch_metrics.append(metrics)
 
     if (step + 1) % 20 == 0 or (step + 1) % steps_per_epoch == 0:
-     epoch = step // steps_per_epoch
-     steps_per_sec = (step - step_loop_start) / (time.time() - t_loop_start)
-     t_loop_start = time.time()
-     step_loop_start = step
-     if (step + 1) % steps_per_epoch == 0:
-      epoch_metrics = common_utils.get_metrics(epoch_metrics)
-      summary = jax.tree_map(lambda x: x.mean(), epoch_metrics)
-      if jax.host_id() == 0:
-        logging.info('train epoch: %d, loss: %.4f, accuracy: %.2f',
-                   epoch, summary['loss'], summary['accuracy'] * 100)
-        for key, vals in epoch_metrics.items():
-          tag = 'train_%s' % key
-          for i, val in enumerate(vals):
-            summary_writer.scalar(tag, val, step - len(vals) + i + 1)
-        summary_writer.scalar('steps per second', steps_per_sec, step)
+      epoch = step // steps_per_epoch
+      steps_per_sec = (step - step_loop_start) / (time.time() - t_loop_start)
+      t_loop_start = time.time()
+      step_loop_start = step
+      if (step + 1) % steps_per_epoch == 0:
+        epoch_metrics = common_utils.get_metrics(epoch_metrics)
+        summary = jax.tree_map(lambda x: x.mean(), epoch_metrics)
+        if jax.host_id() == 0:
+          logging.info('train epoch: %d, loss: %.4f, accuracy: %.2f',
+                       epoch, summary['loss'], summary['accuracy'] * 100)
+          for key, vals in epoch_metrics.items():
+            tag = 'train_%s' % key
+            for i, val in enumerate(vals):
+              summary_writer.scalar(tag, val, step - len(vals) + i + 1)
+          summary_writer.scalar('steps per second', steps_per_sec, step)
 
-      epoch_metrics = []
-      eval_metrics = []
+        epoch_metrics = []
+        eval_metrics = []
 
-      if (epoch + 1) % 4 == 0: #only report stats every 4 epochs
-       # sync batch statistics across replicas
-       state = sync_batch_stats(state)
-       for _ in range(steps_per_eval):
-        eval_batch = next(eval_iter)
-        metrics = p_eval_step(state, eval_batch)
-        eval_metrics.append(metrics)
-       eval_metrics = common_utils.get_metrics(eval_metrics)
-       summary = jax.tree_map(lambda x: x.mean(), eval_metrics)
-       if jax.host_id() == 0:
-        logging.info('eval epoch: %d, loss: %.4f, accuracy: %.2f',
-                   epoch, summary['loss'], summary['accuracy'] * 100)
-        for key, val in eval_metrics.items():
-          tag = 'eval_%s' % key
-          summary_writer.scalar(tag, val.mean(), step)
-        summary_writer.flush()
+        if (epoch + 1) % 4 == 0: #only report stats every 4 epochs
+          # sync batch statistics across replicas
+          state = sync_batch_stats(state)
+          for _ in range(steps_per_eval):
+            eval_batch = next(eval_iter)
+            metrics = p_eval_step(state, eval_batch)
+            eval_metrics.append(metrics)
+          eval_metrics = common_utils.get_metrics(eval_metrics)
+          summary = jax.tree_map(lambda x: x.mean(), eval_metrics)
+          if jax.host_id() == 0:
+            logging.info('eval epoch: %d, loss: %.4f, accuracy: %.2f',
+                         epoch, summary['loss'], summary['accuracy'] * 100)
+            for key, val in eval_metrics.items():
+              tag = 'eval_%s' % key
+              summary_writer.scalar(tag, val.mean(), step)
+            summary_writer.flush()
 
-     else:
-      if jax.host_id() == 0:
-        epoch_step = (step + 1) % steps_per_epoch
-        logging.info('[ep %d][it %d] %0.2f img/sec', epoch, epoch_step, steps_per_sec*batch_size)
+      else:
+        if jax.host_id() == 0:
+          epoch_step = (step + 1) % steps_per_epoch
+          logging.info('[ep %d][it %d] %0.2f img/sec', epoch, epoch_step, steps_per_sec*batch_size)
 
 
     if (step + 1) % steps_per_checkpoint == 0 or step + 1 == num_steps:
