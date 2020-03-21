@@ -206,6 +206,7 @@ def restore_checkpoint(state):
 def save_checkpoint(state):
   if jax.host_id() == 0:
     # get train state from the first replica
+    logging.info('saving checkpoint')
     state = jax.device_get(jax.tree_map(lambda x: x[0], state))
     step = int(state.step)
     checkpoints.save_checkpoint(FLAGS.model_dir, state, step, keep=3)
@@ -241,8 +242,8 @@ def main(argv):
 
   profiler = jax.profiler.start_server(port=1234)
 
-  print("JAX devices: ", jax.devices())
   if jax.host_id() == 0:
+    print("JAX devices(",jax.device_count(),": ", jax.devices())
     summary_writer = tensorboard.SummaryWriter(FLAGS.model_dir)
 
   rng = random.PRNGKey(0)
@@ -302,18 +303,26 @@ def main(argv):
 
   epoch_metrics = []
   t_loop_start = time.time()
+  step_loop_start = 0
+
+  if jax.host_id() == 0:
+    logging.info('beginning training')
+
   for step, batch in zip(range(step_offset, num_steps), train_iter):
     state, metrics = p_train_step(state, batch)
     epoch_metrics.append(metrics)
-    if (step + 1) % steps_per_epoch == 0:
-      epoch = step // steps_per_epoch
+
+    if (step + 1) % 20 == 0 or (step + 1) % steps_per_epoch == 0:
+     epoch = step // steps_per_epoch
+     steps_per_sec = (step - step_loop_start) / (time.time() - t_loop_start)
+     t_loop_start = time.time()
+     step_loop_start = step
+     if (step + 1) % steps_per_epoch == 0:
       epoch_metrics = common_utils.get_metrics(epoch_metrics)
       summary = jax.tree_map(lambda x: x.mean(), epoch_metrics)
-      logging.info('train epoch: %d, loss: %.4f, accuracy: %.2f',
-                   epoch, summary['loss'], summary['accuracy'] * 100)
-      steps_per_sec = steps_per_epoch / (time.time() - t_loop_start)
-      t_loop_start = time.time()
       if jax.host_id() == 0:
+        logging.info('train epoch: %d, loss: %.4f, accuracy: %.2f',
+                   epoch, summary['loss'], summary['accuracy'] * 100)
         for key, vals in epoch_metrics.items():
           tag = 'train_%s' % key
           for i, val in enumerate(vals):
@@ -323,27 +332,38 @@ def main(argv):
       epoch_metrics = []
       eval_metrics = []
 
-      # sync batch statistics across replicas
-      state = sync_batch_stats(state)
-      for _ in range(steps_per_eval):
+      if (epoch + 1) % 4 == 0: #only report stats every 4 epochs
+       # sync batch statistics across replicas
+       state = sync_batch_stats(state)
+       for _ in range(steps_per_eval):
         eval_batch = next(eval_iter)
         metrics = p_eval_step(state, eval_batch)
         eval_metrics.append(metrics)
-      eval_metrics = common_utils.get_metrics(eval_metrics)
-      summary = jax.tree_map(lambda x: x.mean(), eval_metrics)
-      logging.info('eval epoch: %d, loss: %.4f, accuracy: %.2f',
+       eval_metrics = common_utils.get_metrics(eval_metrics)
+       summary = jax.tree_map(lambda x: x.mean(), eval_metrics)
+       if jax.host_id() == 0:
+        logging.info('eval epoch: %d, loss: %.4f, accuracy: %.2f',
                    epoch, summary['loss'], summary['accuracy'] * 100)
-      if jax.host_id() == 0:
         for key, val in eval_metrics.items():
           tag = 'eval_%s' % key
           summary_writer.scalar(tag, val.mean(), step)
         summary_writer.flush()
+
+     else:
+      if jax.host_id() == 0:
+        epoch_step = (step + 1) % steps_per_epoch
+        logging.info('[ep %d][it %d] %0.2f img/sec', epoch, epoch_step, steps_per_sec*batch_size)
+
+
     if (step + 1) % steps_per_checkpoint == 0 or step + 1 == num_steps:
       state = sync_batch_stats(state)
       save_checkpoint(state)
 
   # Wait until computations are done before exiting
   jax.random.normal(jax.random.PRNGKey(0), ()).block_until_ready()
+
+  if jax.host_id() == 0:
+    logging.info('training complete!')
 
 if __name__ == '__main__':
   app.run(main)
