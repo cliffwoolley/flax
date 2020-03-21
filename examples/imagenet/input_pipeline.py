@@ -16,9 +16,9 @@
 """
 
 import jax
+import os
 
 import tensorflow.compat.v2 as tf
-import tensorflow_datasets as tfds
 
 
 TRAIN_IMAGES = 1281167
@@ -177,6 +177,18 @@ def preprocess_for_eval(image_bytes, dtype=tf.float32, image_size=IMAGE_SIZE):
   return image
 
 
+def get_filenames(is_training, data_dir):
+  """Return filenames for dataset."""
+  if is_training:
+    return [
+        os.path.join(data_dir, 'train-%05d-of-01024' % i)
+        for i in range(1,1024)]
+  else:
+    return [
+        os.path.join(data_dir, 'validation-%05d-of-00128' % i)
+        for i in range(1,128)]
+
+
 def load_split(batch_size, train, dtype=tf.float32, image_size=IMAGE_SIZE):
   """Creates a split from the ImageNet dataset using TensorFlow Datasets.
 
@@ -188,25 +200,28 @@ def load_split(batch_size, train, dtype=tf.float32, image_size=IMAGE_SIZE):
   Returns:
     A `tf.data.Dataset`.
   """
-  if train:
-    split_size = TRAIN_IMAGES // jax.host_count()
-    start = jax.host_id() * split_size
-    split = 'train[{}:{}]'.format(start, start + split_size)
-  else:
-    split_size = EVAL_IMAGES // jax.host_count()
-    start = jax.host_id() * split_size
-    split = 'validation[{}:{}]'.format(start, start + split_size)
 
-  def decode_example(example):
+  def decode_example(example_serialized):
+    feature_map = {
+      'image/encoded':     tf.io.FixedLenFeature([], dtype=tf.string, default_value=''),
+      'image/class/label': tf.io.FixedLenFeature([], dtype=tf.int64,  default_value=-1),
+      'image/class/text':  tf.io.FixedLenFeature([], dtype=tf.string, default_value=''),
+    }
+    example = tf.io.parse_single_example(serialized=example_serialized, features=feature_map)
+
     if train:
-      image = preprocess_for_train(example['image'], dtype, image_size)
+      image = preprocess_for_train(example['image/encoded'], dtype, image_size)
     else:
-      image = preprocess_for_eval(example['image'], dtype, image_size)
-    return {'image': image, 'label': example['label']}
+      image = preprocess_for_eval(example['image/encoded'], dtype, image_size)
 
-  ds = tfds.load('imagenet2012:5.*.*', split=split, decoders={
-      'image': tfds.decode.SkipDecoding(),
-  })
+    label = tf.cast(example['image/class/label'], dtype=tf.int32)
+
+    return {'image': image, 'label': label}
+
+  tfrecords = tf.data.Dataset.from_tensor_slices(get_filenames(is_training=train, data_dir='/data'))
+  tfrecords = tfrecords.shard(num_shards=jax.host_count(), index=jax.host_id())
+  ds = tf.data.TFRecordDataset(tfrecords)
+
   ds.options().experimental_threading.private_threadpool_size = 48
   ds.options().experimental_threading.max_intra_op_parallelism = 1
 
@@ -222,6 +237,6 @@ def load_split(batch_size, train, dtype=tf.float32, image_size=IMAGE_SIZE):
   if not train:
     ds = ds.repeat()
 
-  ds = ds.prefetch(10)
+  ds = ds.prefetch(buffer_size=tf.data.experimental.AUTOTUNE)
 
   return ds
