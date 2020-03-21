@@ -20,6 +20,7 @@ The data is loaded using tensorflow_datasets.
 """
 
 import functools
+import os
 import time
 
 from absl import app
@@ -59,8 +60,8 @@ flags.DEFINE_float(
     help=('The decay rate used for the momentum optimizer.'))
 
 flags.DEFINE_integer(
-    'batch_size', default=128,
-    help=('Batch size for training.'))
+    'batch_size', default=320,
+    help=('Batch size per device for training.'))
 
 flags.DEFINE_integer(
     'num_epochs', default=90,
@@ -71,18 +72,18 @@ flags.DEFINE_string(
     help=('Directory to store model data'))
 
 flags.DEFINE_bool(
-    'half_precision', default=False,
+    'half_precision', default=True,
     help=('If bfloat16/float16 should be used instead of float32.'))
 
 flags.DEFINE_float(
-    'loss_scaling', default=1.,
+    'loss_scaling', default=256.,
     help=('Rescale the loss to avoid underflow when training with'
           ' reduced precision'))
 
-flags.DEFINE_integer('jax_gpu_server_port', 0, 'Address of JAX GPU master')
-flags.DEFINE_string('jax_gpu_server_address', '', 'Address of JAX GPU master')
-flags.DEFINE_integer('jax_gpu_num_nodes', 1, 'Num GPU nodes.')
-flags.DEFINE_integer('jax_gpu_node_id', 0, 'Num GPU nodes.')
+flags.DEFINE_integer('jax_gpu_server_port', os.getenv('MASTER_PORT', 0), 'Address of JAX GPU master')
+flags.DEFINE_string('jax_gpu_server_address', os.getenv('MASTER_ADDR', ''), 'Address of JAX GPU master')
+flags.DEFINE_integer('jax_gpu_num_nodes', os.getenv('WORLD_SIZE', 1), 'Num GPU nodes.') # note: assumes 1 proc per node
+flags.DEFINE_integer('jax_gpu_node_id', os.getenv('RANK', 0), 'GPU node ID.')
 
 
 def create_model(key, batch_size, image_size, model_dtype):
@@ -228,8 +229,8 @@ def main(argv):
       jax_gpu_server = xla_client._xla.get_distributed_runtime_service(
           '[::]:{}'.format(FLAGS.jax_gpu_server_port), FLAGS.jax_gpu_num_nodes)
     client = xla_client._xla.get_distributed_runtime_client(
-          "dns:///{}}:{}".format(FLAGS.jax_gpu_server_address,
-                                 FLAGS.jax_gpu_server_port))
+          "dns:///{}:{}".format(FLAGS.jax_gpu_server_address,
+                                FLAGS.jax_gpu_server_port))
     factory = functools.partial(
           xla_client._gpu_backend_factory,
           distributed_client=client,
@@ -250,11 +251,9 @@ def main(argv):
 
   image_size = 224
 
-  batch_size = FLAGS.batch_size
-  if batch_size % jax.device_count() > 0:
-    raise ValueError('Batch size must be divisible by the number of devices')
+  device_batch_size = FLAGS.batch_size
+  batch_size = device_batch_size * jax.device_count()
   local_batch_size = batch_size // jax.host_count()
-  device_batch_size = batch_size // jax.device_count()
 
   platform = jax.local_devices()[0].platform
 
